@@ -1,0 +1,444 @@
+FILE: /Users/rishwi/Projects/provisioning-backend/src/modules/preview/routes/preview.routes.ts
+
+import { Router } from "express";
+import axios from "axios";
+import { asyncHandler } from "../../../middleware/async-handler";
+import { CustomersRepository } from "../../customers/repositories/customers.repository";
+import { PreviewService } from "../services/preview.service";
+
+const router = Router();
+const repo = new CustomersRepository();
+const previewService = new PreviewService();
+
+function slugify(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function domainSlug(value: string): string {
+  const domain = String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0]
+    .split("?")[0]
+    .split("#")[0];
+
+  return slugify(domain.split(".").filter(Boolean)[0] || domain);
+}
+
+function parseMaybeUrl(value: string): URL | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  try {
+    return new URL(raw);
+  } catch {
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) {
+      try {
+        return new URL(`https://${raw}`);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+function isEditorLikePreviewUrl(value?: string): boolean {
+  const url = parseMaybeUrl(String(value || ""));
+  if (!url) return false;
+
+  const hostname = url.hostname.toLowerCase();
+  return (
+    hostname === "app.base44.com" ||
+    hostname === "preview.vedantix.nl" ||
+    url.pathname.toLowerCase().includes("/editor")
+  );
+}
+
+function normalizeDiscoveredBase44Url(value: string): string {
+  const url = parseMaybeUrl(value);
+  if (!url || !url.hostname.toLowerCase().endsWith(".base44.app")) {
+    return "";
+  }
+
+  return url.origin;
+}
+
+async function discoverPublicBase44Url(...values: Array<string | undefined>) {
+  const candidates = values
+    .map((value) => String(value || "").trim())
+    .filter((value) => value && isEditorLikePreviewUrl(value));
+
+  for (const candidate of candidates) {
+    try {
+      const response = await axios.get<string>(candidate, {
+        responseType: "text",
+        timeout: 5000,
+        validateStatus: (status) => status >= 200 && status < 500,
+      });
+      const matches =
+        String(response.data || "").match(/https?:\/\/[a-z0-9-]+\.base44\.app/gi) || [];
+
+      for (const match of matches) {
+        const publicUrl = normalizeDiscoveredBase44Url(match);
+        if (publicUrl) {
+          return publicUrl;
+        }
+      }
+    } catch (error) {
+      console.warn("[PREVIEW_BASE44_DISCOVERY_FAILED]", {
+        candidate,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  return "";
+}
+
+function jsonForScript(value: string): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
+function absolutizeRootAssetUrls(html: string, targetOrigin: string): string {
+  return html
+    .replace(
+      /(<(?:script|link|img|source|video|audio)\b[^>]*\s(?:src|href|poster)=["'])\/(?!\/)/gi,
+      `$1${targetOrigin}/`,
+    )
+    .replace(
+      /(<(?:source|img)\b[^>]*\ssrcset=["'])(\/(?!\/)[^"']*)(["'])/gi,
+      (_match, prefix: string, value: string, suffix: string) => {
+        const rewritten = value.replace(
+          /(^|,\s*)\/(?!\/)([^,\s]+)/g,
+          (_item, separator: string, path: string) =>
+            `${separator}${targetOrigin}/${path}`,
+        );
+        return `${prefix}${rewritten}${suffix}`;
+      },
+    );
+}
+
+function rewritePreviewHtml(html: string, targetUrl: string, previewPath: string): string {
+  const target = new URL(targetUrl);
+  const targetOrigin = target.origin;
+  const publicPath = previewPath.startsWith("/") ? previewPath : `/${previewPath}`;
+  const runtime = `
+<script>
+(() => {
+  const targetOrigin = ${jsonForScript(targetOrigin)};
+  const publicPath = ${jsonForScript(publicPath)};
+  const apiPathPattern = /^\\/(api|apps|prod|functions|app-logs|agent-conversations|ws-user-apps|socket\\.io|engine\\.io)(\\/|$)/;
+
+  const rewriteUrl = (value) => {
+    try {
+      const parsed = new URL(String(value), window.location.origin);
+      if (parsed.origin === window.location.origin && apiPathPattern.test(parsed.pathname)) {
+        return targetOrigin + parsed.pathname + parsed.search + parsed.hash;
+      }
+    } catch {}
+    return value;
+  };
+
+  if (window.location.pathname !== "/") {
+    window.history.replaceState(window.history.state, "", "/" + window.location.search + window.location.hash);
+  }
+
+  const nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (nativeFetch) {
+    window.fetch = (input, init) => {
+      if (typeof input === "string" || input instanceof URL) {
+        return nativeFetch(rewriteUrl(input.toString()), init);
+      }
+
+      if (input instanceof Request) {
+        const nextUrl = rewriteUrl(input.url);
+        if (nextUrl !== input.url) {
+          return nativeFetch(new Request(nextUrl, input), init);
+        }
+      }
+
+      return nativeFetch(input, init);
+    };
+  }
+
+  const nativeOpen = window.XMLHttpRequest && window.XMLHttpRequest.prototype.open;
+  if (nativeOpen) {
+    window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      return nativeOpen.call(this, method, rewriteUrl(url), ...rest);
+    };
+  }
+
+  const restorePublicPath = () => {
+    if (window.location.pathname !== publicPath) {
+      window.history.replaceState(window.history.state, "", publicPath + window.location.search + window.location.hash);
+    }
+  };
+
+  window.addEventListener("load", () => window.setTimeout(restorePublicPath, 0));
+  window.setTimeout(restorePublicPath, 1200);
+  window.setTimeout(restorePublicPath, 3000);
+})();
+</script>`;
+  const robotsMeta = '<meta name="robots" content="noindex,nofollow,noarchive">';
+  const rewritten = absolutizeRootAssetUrls(html, targetOrigin)
+    .replace(/<meta[^>]+name=["']robots["'][^>]*>/i, "")
+    .replace(/<link[^>]+rel=["']canonical["'][^>]*>/i, "");
+
+  if (/<head[^>]*>/i.test(rewritten)) {
+    return rewritten.replace(/<head([^>]*)>/i, `<head$1>\n${robotsMeta}\n${runtime}`);
+  }
+
+  return `${runtime}${rewritten}`;
+}
+
+function buildPlaceholderHtml(slug: string, previewPath: string): string {
+  const safeSlug = slugify(slug);
+  const path = previewPath.startsWith("/") ? previewPath : `/${previewPath}`;
+  const robots = '<meta name="robots" content="noindex,nofollow,noarchive">';
+  const styles = `
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+      .wrap { min-height: 100vh; display: grid; place-items: center; padding: 2rem; }
+      .card { max-width: 720px; width: 100%; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 28px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); background: rgba(255,255,255,0.9); backdrop-filter: blur(6px); }
+      h1 { margin: 0 0 8px; font-size: 22px; }
+      p { margin: 8px 0; line-height: 1.5; }
+      code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 6px; }
+      .muted { opacity: 0.7; font-size: 14px; }
+    </style>
+  `;
+  const html = `
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8">
+    <title>Preview wordt klaargezet</title>
+    ${robots}
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    ${styles}
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Preview wordt klaargezet</h1>
+        <p>We hebben nog geen live preview gevonden voor <code>${safeSlug}</code>.</p>
+        <p class="muted">Deze pagina komt automatisch beschikbaar zodra de Base44 preview gereed is.</p>
+        <p class="muted">Publieke preview pad: <code>${path}</code></p>
+      </div>
+    </div>
+  </body>
+</html>
+  `;
+  return html;
+}
+
+function isActiveCustomer(customer: any): boolean {
+  if (!customer) return false;
+  if (customer.status === "cancelled") return false;
+  if (customer.deletedAt) return false;
+  return true;
+}
+
+async function resolvePreview(slug: string, tenantId: string) {
+  const normalizedSlug = slugify(slug);
+  const customers = (await repo.listByTenant(tenantId)).filter(isActiveCustomer);
+
+  const customer = customers.find((c) => {
+    const candidates = [
+      c.preview?.slug,
+      c.preview?.path?.replace(/^\//, ""),
+      domainSlug(c.domain),
+      slugify(c.companyName || c.domain),
+    ]
+      .filter(Boolean)
+      .map((value) => String(value).toLowerCase());
+
+    return candidates.includes(normalizedSlug);
+  });
+
+  if (!customer) {
+    return null;
+  }
+
+  const publicSlug = previewService.buildPreviewSlug(
+    customer.companyName,
+    customer.domain,
+  );
+
+  const fullUrl = previewService.buildPreviewUrl(publicSlug);
+
+  const storedTargetUrl = customer.preview?.targetUrl || "";
+  const storedFullUrl = customer.preview?.fullUrl || "";
+  const fallbackTargetUrl =
+    storedTargetUrl &&
+    storedTargetUrl !== storedFullUrl &&
+    storedTargetUrl !== fullUrl
+      ? storedTargetUrl
+      : "";
+
+  const discovered = await discoverPublicBase44Url(
+    customer.base44?.previewUrl,
+    customer.base44?.editorUrl,
+    fallbackTargetUrl,
+  );
+
+  const targetUrl =
+    discovered ||
+    previewService.resolvePreviewTargetUrl({
+      base44PreviewUrl: customer.base44?.previewUrl,
+      base44EditorUrl: customer.base44?.editorUrl,
+      base44AppName: customer.base44?.appName,
+      fallbackTargetUrl,
+    });
+
+  return {
+    customer,
+    preview: {
+      slug: publicSlug,
+      path: previewService.buildPreviewPath(publicSlug),
+      fullUrl,
+      targetUrl: targetUrl || "",
+      status: (customer.preview?.status as string) || (targetUrl ? "READY" : "NOT_READY"),
+      updatedAt: customer.preview?.updatedAt,
+    },
+  };
+}
+
+async function renderPreviewHtmlOrPlaceholder(params: {
+  slug: string;
+  tenantId: string;
+  htmlRoutePath: string; // the public path where we render this HTML, e.g. `/preview/:slug`
+}) {
+  const normalizedSlug = slugify(params.slug);
+  const result = await resolvePreview(normalizedSlug, params.tenantId);
+
+  // Determine the "public" path we want to show in the address bar.
+  // Always prefer the page route, not the internal preview metadata path.
+  const publicPath = `/preview/${normalizedSlug}`;
+
+  // If we have a resolved customer + target URL, try to fetch and rewrite it.
+  const tryFetchAndRewrite = async (targetUrl: string) => {
+    const response = await axios.get<string>(targetUrl, {
+      responseType: "text",
+      timeout: 15000,
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    const html = rewritePreviewHtml(response.data, targetUrl, publicPath);
+    return html;
+  };
+
+  // 1) If we have a ready preview target, render it.
+  if (result && result.preview.targetUrl) {
+    try {
+      const html = await tryFetchAndRewrite(result.preview.targetUrl);
+      return { status: 200, html };
+    } catch (error) {
+      console.warn("[PREVIEW_FETCH_FAILED]", {
+        slug: normalizedSlug,
+        targetUrl: result.preview.targetUrl,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+      // Fall through to placeholder
+    }
+  }
+
+  // 2) Fallback: attempt a best-effort guess for future customers
+  //    by trying https://{slug}.base44.app
+  const guessedUrl = `https://${normalizedSlug}.base44.app`;
+  try {
+    const probe = await axios.get<string>(guessedUrl, {
+      responseType: "text",
+      timeout: 8000,
+      validateStatus: (status) => status >= 200 && status < 500,
+    });
+
+    if (probe.status >= 200 && probe.status < 400) {
+      // Looks like a valid public Base44 app. Render it.
+      const html = rewritePreviewHtml(probe.data, guessedUrl, publicPath);
+      return { status: 200, html };
+    }
+  } catch {
+    // ignore and fall back to placeholder
+  }
+
+  // 3) Final fallback: placeholder page so links work for future customers.
+  const html = buildPlaceholderHtml(normalizedSlug, publicPath);
+  return { status: 200, html };
+}
+
+router.get(
+  "/api/preview/:slug/html",
+  asyncHandler(async (req, res) => {
+    const tenantId = String(req.ctx?.tenantId || "default");
+    const slug = String(req.params.slug || "");
+    const result = await renderPreviewHtmlOrPlaceholder({
+      slug,
+      tenantId,
+      htmlRoutePath: `/api/preview/${slug}/html`,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(result.status).send(result.html);
+  }),
+);
+
+router.get(
+  "/api/preview/:slug",
+  asyncHandler(async (req, res) => {
+    const tenantId = String(req.ctx?.tenantId || "default");
+    const result = await resolvePreview(String(req.params.slug || ""), tenantId);
+
+    if (!result) {
+      return res.status(404).json({
+        error: "Preview not found",
+        requestId: req.ctx?.requestId,
+      });
+    }
+
+    res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({
+      data: {
+        preview: result.preview,
+        customer: {
+          id: result.customer.id,
+          companyName: result.customer.companyName,
+          domain: result.customer.domain,
+        },
+      },
+      requestId: req.ctx?.requestId,
+    });
+  }),
+);
+
+router.get(
+  "/preview/:slug",
+  asyncHandler(async (req, res) => {
+    const tenantId = String(req.ctx?.tenantId || "default");
+    const slug = String(req.params.slug || "");
+
+    const result = await renderPreviewHtmlOrPlaceholder({
+      slug,
+      tenantId,
+      htmlRoutePath: `/preview/${slug}`,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(result.status).send(result.html);
+  }),
+);
+
+export default router;
