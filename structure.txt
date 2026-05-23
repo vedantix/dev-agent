@@ -1,0 +1,58 @@
+src
+├── agent
+│   ├── agent-request.ts
+│   ├── agent-response.ts
+│   ├── agent-runner.service.ts
+│   ├── agent.service.ts
+│   ├── agent.types.ts
+│   ├── file-selection.service.ts
+│   ├── json.service.ts
+│   ├── patch-parser.service.ts
+│   ├── patch-validator.service.ts
+│   └── patch.types.ts
+├── cache
+│   └── repository-cache.service.ts
+├── config
+│   └── agent.config.ts
+├── files
+│   └── file.service.ts
+├── github
+│   ├── context-loader.service.ts
+│   ├── diff.service.ts
+│   ├── file.service.ts
+│   ├── git.service.ts
+│   ├── repository-index.service.ts
+│   ├── repository-scanner.service.ts
+│   ├── repository-writer.service.ts
+│   ├── repository.service.ts
+│   └── sandbox-writer.service.ts
+├── index.ts
+├── logger
+│   └── logger.ts
+├── memory
+│   ├── memory.service.ts
+│   └── memory.types.ts
+├── openai
+│   ├── code-generator.service.ts
+│   └── openai.service.ts
+├── output
+│   └── health.route.ts
+├── prompt
+│   └── find-files.prompt.ts
+└── tasks
+    ├── agent-task.ts
+    ├── analyze-code.task.ts
+    ├── debug-preview.task.ts
+    ├── debug-task.ts
+    ├── dry-run.task.ts
+    ├── find-files.task.ts
+    ├── generate-finance-kpi.task.ts
+    ├── generate-patch.task.ts
+    ├── git-workflow.task.ts
+    ├── load-context.task.ts
+    ├── repository-analysis.task.ts
+    ├── save-patch.task.ts
+    ├── summarize-context.task.ts
+    └── task-runner.ts
+
+12 directories, 44 files
