@@ -10,5 +10,10 @@
     "outDir": "./dist",
     "skipLibCheck": true,
     "ignoreDeprecations": "6.0"
-  }
+  },
+  "include": [
+    "src/index.ts",
+    "src/cli.ts",
+    "src/worker/**/*.ts"
+  ]
 }
