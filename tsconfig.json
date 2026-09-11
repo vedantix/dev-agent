@@ -3,16 +3,12 @@
     "target": "es2020",
     "module": "commonjs",
     "moduleResolution": "node",
-
     "esModuleInterop": true,
-
     "strict": true,
-
     "types": ["node"],
-
     "rootDir": "./src",
     "outDir": "./dist",
-
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "ignoreDeprecations": "6.0"
   }
 }
